@@ -4,8 +4,33 @@ resources:
     tip_challenge_job:
       name: tip_challenge_job
 
+      trigger:
+        # Run this job every day, exactly one day from the last run; see https://docs.databricks.com/api/workspace/jobs/create#trigger
+        periodic:
+          interval: 1
+          unit: DAYS
+
+      email_notifications:
+        on_failure:
+          - swapnilmaddula@gmx.co.uk
+
       tasks:
         - task_key: read_from_source
           notebook_task:
             notebook_path: ../src/tip_challenge/read_from_source.ipynb
         
+        - task_key: load_to_gold_dimensions
+          sql_task:
+            file:
+              path: ../src/tip_challenge/load_to_gold/create_dim_technician.sql
+              source: WORKSPACE
+            warehouse_id: 88bb745273a31a80
+
+        - task_key: load_to_gold_fact
+          sql_task:
+            file:
+              path: ../src/tip_challenge/load_to_gold/create_fact_repair_job.sql
+              source: WORKSPACE
+            warehouse_id: 88bb745273a31a80
+      queue:
+        enabled: true
