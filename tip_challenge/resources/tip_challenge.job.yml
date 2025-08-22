@@ -12,7 +12,7 @@ resources:
 
       email_notifications:
         on_failure:
-          - swapnilmaddula@gmx.co.uk
+          - swapnilmaddula@gmail.com
 
       tasks:
         - task_key: read_from_source
