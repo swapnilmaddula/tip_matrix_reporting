@@ -6,7 +6,6 @@ resources:
 
       tasks:
         - task_key: read_from_source
-          job_cluster_key: job_cluster
           notebook_task:
             notebook_path: ../src/tip_challenge/read_from_source.ipynb
         
