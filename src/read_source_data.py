@@ -1,69 +1,73 @@
-import json
+import os
+import requests
 from datetime import datetime
 from pyspark.sql import SparkSession
-from pyspark.sql.types import StructType, StructField, StringType, LongType
+from pyspark.sql.functions import col
+from pyspark.sql.utils import AnalysisException
 
-class LoadTweetData:
-    def __init__(self, file_path_source, folder_path_silver):
-        self.new_data = []
-        self.file_path_source = file_path_source 
-        self.folder_path_silver = folder_path_silver 
-        self.spark = SparkSession.builder.appName("Elsevier").getOrCreate()
+
+class read_api:
+    def __init__(self, api_url: str, folder_path_silver: str):
+        """
+        api_url: URL endpoint that returns JSON (a list of dicts)
+        folder_path_silver: Target location for silver data (e.g., DBFS or local path)
+        """
+        self.api_url = api_url
+        self.folder_path_silver = folder_path_silver
+        self.spark = SparkSession.builder.appName("TIP").getOrCreate()
         self.spark.sparkContext.setLogLevel("ERROR")
 
-    def read_source_file(self, file_path):
-        with open(file_path, 'r', encoding='utf-8') as file:
-            data = file.readlines()
-        json_lines = data
-        rows = []
-        for line in json_lines:
-            try:
-                tweet = json.loads(line.strip())
-                tweet_id = tweet['twitter']['id']
-                tweet_id = int(tweet_id)
-                created_at_raw = tweet['interaction']['created_at']
-                created_at = datetime.strptime(created_at_raw, '%a, %d %b %Y %H:%M:%S +0000').isoformat()
-                content = tweet['interaction']['content']
-                rows.append([created_at, tweet_id, content])
-            except Exception as e:
-                pass
-        return rows
+        self.username = os.environ.get("tip_challenge_username")
+        self.password = os.environ.get("tip_challenge_password")
 
-    #incremental load
+        if not self.username or not self.password:
+            raise ValueError("Missing environment variables: tip_challenge_username or tip_challenge_password")
+
+    def fetch_api_data(self):
+        try:
+            response = requests.get(self.api_url, auth=(self.username, self.password))
+            response.raise_for_status()
+            data = response.json()
+            df = self.spark.createDataFrame(data)
+
+            #add surrogate_key, this can also be imported from the config, and then used as part of the metadata ingestion framework
+            df = df.withColumn("surrogate_key", col("WSM_key").cast("string"))
+            return df 
+        except Exception as e:
+            print(f"Error fetching API data: {e}")
+            return []
+
+
     def incremental_load(self):
-        rows = self.read_source_file(self.file_path_source)
-        schema = StructType([
-            StructField("created_at", StringType(), True),
-            StructField("tweet_id", LongType(), True),
-            StructField("content", StringType(), True)
-        ])
-        
-        new_data = self.spark.createDataFrame(rows, schema)
-        new_data.createOrReplaceTempView("new_data")
-        new_data.write.mode("overwrite").options(delimiter="#@#@").csv(path=self.folder_path_silver, header=True)
+        self.spark.catalog.clearCache()  # Clear metadata cache
 
+        new_data = self.fetch_api_data()
+
+        # Temporary staging directory to avoid race condition
+        temp_path = self.folder_path_silver + "/_tmp"
+
+        new_data.createOrReplaceTempView("new_data")
+        new_data.write.mode("overwrite").csv(temp_path, header=True)
 
         try:
-            source_data = self.spark.read.options(delimiter="#@#@").csv(path=f"{self.folder_path_silver}/*.csv", header=True, schema=schema)
+            source_data = self.spark.read.csv(self.folder_path_silver + "/*.csv", header=True)
             source_data.createOrReplaceTempView("source_data")
-        except Exception as e:
+        except AnalysisException as e:
             print(f"Error reading source data: {e}")
-            source_data = self.spark.createDataFrame([], schema)
+            source_data = self.spark.createDataFrame([], new_data.schema)
             source_data.createOrReplaceTempView("source_data")
 
-
-        # SQL query to merge new data into existing data
         merged_data = self.spark.sql("""
-            SELECT new_data.created_at, new_data.tweet_id, new_data.content
+            SELECT new_data.*
             FROM new_data
             LEFT ANTI JOIN source_data
-            ON new_data.tweet_id = source_data.tweet_id
+            ON new_data.surrogate_key = source_data.surrogate_key
             UNION
             SELECT * FROM source_data
-        """)
-        merged_data.dropDuplicates()
+        """).dropDuplicates(["surrogate_key"])
+
         try:
-            merged_data.write.mode("overwrite").options(delimiter="#@#@").csv(path=self.folder_path_silver, header=True)
+            merged_data.write.mode("overwrite").csv(self.folder_path_silver, header=True)
             print("Data written successfully")
         except Exception as e:
             print(f"Error writing data: {e}")
